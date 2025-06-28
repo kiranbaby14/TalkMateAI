@@ -1,0 +1,11 @@
+{
+    "name": "@talkmateai/server",
+    "version": "1.0.0",
+    "private": true,
+    "scripts": {
+      "dev": "uv run uvicorn app.main:app --reload",
+      "start": "uv run uvicorn app.main:app",
+      "format": "uv run black .",
+      "format:check": "uv run black --check ."
+    }
+  }

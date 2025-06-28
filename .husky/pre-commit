@@ -1,0 +1,8 @@
+# Check Prettier standards
+pnpm run format:check ||
+(
+    echo '---------------------------------------------------------------------------------------
+Prettier Check Failed (GIT COMMIT not made). Run **pnpm run format** or make format, add changes and try commit again.
+---------------------------------------------------------------------------------------';
+    false;
+)
