@@ -1,25 +1,59 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
-name = "server"
+name = "talkmateai-server"
 version = "0.1.0"
 description = "TalkMateAI server application"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.11"
 dependencies = [
-    "fastapi>=0.115.12",
-    "pydantic>=2.11.5",
-    "pydantic-settings>=2.9.1",
-    "python-dotenv>=1.1.0",
-    "uvicorn[standard]>=0.34.2",
+    # PyTorch with CUDA support - specific versions
+    "torch==2.6.0+cu124",
+    "torchvision==0.21.0+cu124",
+    # Flash attention - Windows specific wheel
+    "flash-attn @ https://github.com/kingbri1/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu124torch2.6.0cxx11abiFALSE-cp310-cp310-win_amd64.whl ; sys_platform == 'win32'",
+    # From requirements.txt
+    "soundfile==0.13.1",
+    "pillow==11.0.0",
+    "scipy==1.15.2",
+    "backoff==2.2.1",
+    "peft==0.13.2",
+    "wheel",
+    "packaging",
+    "kokoro",
+    "requests",
+    "websockets",
+    # "transformers==4.48.2",
+    "transformers @ git+https://github.com/huggingface/transformers@v4.49.0-SmolVLM-2",
+    "accelerate>=1.7.0",
+    "bitsandbytes>=0.46.0",
+    "triton-windows==3.2.0.post17",
+    "pip>=25.1.1",
+    "fastapi[standard]>=0.115.6",
+    "uvicorn>=0.34.3",
+    "whisper>=1.1.10",
 ]
 
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
-    "black>=25.1.0",
+    "black>=24.10.0",
+    "pre-commit>=4.0.1",
 ]
+
+[tool.uv]
+# PyTorch CUDA index for GPU support
+extra-index-url = [
+    "https://download.pytorch.org/whl/cu124"
+]
+index-strategy = "unsafe-best-match"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["app"]
+include = [
+    "*.py",
+    "README.md",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
