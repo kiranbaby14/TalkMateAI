@@ -16,6 +16,7 @@ from PIL import Image
 import time
 import os
 from datetime import datetime
+from pathlib import Path
 from threading import Thread
 import re
 from typing import Optional, Dict, Any
@@ -49,6 +50,67 @@ except NameError:
             return await iterator.__anext__()
         except StopAsyncIteration:
             raise
+
+
+class ImageManager:
+    """Manages image saving and verification"""
+
+    def __init__(self, save_directory="received_images"):
+        self.save_directory = Path(save_directory)
+        self.save_directory.mkdir(exist_ok=True)
+        logger.info(f"Image save directory: {self.save_directory.absolute()}")
+
+    def save_image(self, image_data: bytes, client_id: str, prefix: str = "img") -> str:
+        """Save image data and return the filename"""
+        try:
+            # Create timestamp-based filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # milliseconds
+            filename = f"{prefix}_{client_id}_{timestamp}.jpg"
+            filepath = self.save_directory / filename
+
+            # Save the image
+            with open(filepath, "wb") as f:
+                f.write(image_data)
+
+            # Log file info
+            file_size = len(image_data)
+            logger.info(f"💾 Saved image: {filename} ({file_size:,} bytes)")
+
+            return str(filepath)
+
+        except Exception as e:
+            logger.error(f"❌ Error saving image: {e}")
+            return None
+
+    def verify_image(self, filepath: str) -> dict:
+        """Verify saved image and return info"""
+        try:
+            if not os.path.exists(filepath):
+                return {"error": "File not found"}
+
+            # Get file stats
+            stat = os.stat(filepath)
+            file_size = stat.st_size
+
+            # Try to open with PIL to verify it's a valid image
+            with Image.open(filepath) as img:
+                info = {
+                    "filepath": filepath,
+                    "file_size": file_size,
+                    "format": img.format,
+                    "mode": img.mode,
+                    "size": img.size,
+                    "width": img.width,
+                    "height": img.height,
+                    "valid": True,
+                }
+
+            logger.info(f"✅ Image verified: {info}")
+            return info
+
+        except Exception as e:
+            logger.error(f"❌ Error verifying image {filepath}: {e}")
+            return {"error": str(e), "valid": False}
 
 
 class WhisperProcessor:
@@ -558,6 +620,15 @@ class ConnectionManager:
         self.active_connections: Dict[str, WebSocket] = {}
         # Track current processing tasks for each client
         self.current_tasks: Dict[str, Dict[str, asyncio.Task]] = {}
+        # Add image manager
+        self.image_manager = ImageManager()
+        # Track statistics
+        self.stats = {
+            "audio_segments_received": 0,
+            "images_received": 0,
+            "audio_with_image_received": 0,
+            "last_reset": datetime.now(),
+        }
 
     async def connect(self, websocket: WebSocket, client_id: str):
         await websocket.accept()
@@ -602,6 +673,20 @@ class ConnectionManager:
         """Set a task for a client"""
         if client_id in self.current_tasks:
             self.current_tasks[client_id][task_type] = task
+
+    def update_stats(self, event_type: str):
+        """Update statistics"""
+        if event_type in self.stats:
+            self.stats[event_type] += 1
+
+    def get_stats(self) -> dict:
+        """Get current statistics"""
+        uptime = datetime.now() - self.stats["last_reset"]
+        return {
+            **self.stats,
+            "uptime_seconds": uptime.total_seconds(),
+            "active_connections": len(self.active_connections),
+        }
 
 
 manager = ConnectionManager()
@@ -653,6 +738,40 @@ app.add_middleware(
 )
 
 
+@app.get("/stats")
+async def get_stats():
+    """Get server statistics"""
+    return manager.get_stats()
+
+
+@app.get("/images")
+async def list_saved_images():
+    """List all saved images"""
+    try:
+        images_dir = manager.image_manager.save_directory
+        if not images_dir.exists():
+            return {"images": [], "message": "No images directory found"}
+
+        images = []
+        for image_file in images_dir.glob("*.jpg"):
+            stat = image_file.stat()
+            images.append(
+                {
+                    "filename": image_file.name,
+                    "path": str(image_file),
+                    "size": stat.st_size,
+                    "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                }
+            )
+
+        images.sort(key=lambda x: x["created"], reverse=True)  # Most recent first
+        return {"images": images, "count": len(images)}
+
+    except Exception as e:
+        logger.error(f"Error listing images: {e}")
+        return {"error": str(e)}
+
+
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
     """WebSocket endpoint for real-time multimodal interaction"""
@@ -680,10 +799,37 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 except Exception:
                     break
 
-        async def process_audio_segment(audio_data):
-            """Process a complete audio segment through the pipeline"""
+        async def process_audio_segment(audio_data, image_data=None):
+            """Process a complete audio segment through the pipeline with optional image"""
             try:
-                logger.info(f"Processing audio segment ({len(audio_data)} bytes)")
+                # Log what we received
+                if image_data:
+                    logger.info(
+                        f"🎥 Processing audio+image segment: audio={len(audio_data)} bytes, image={len(image_data)} bytes"
+                    )
+                    manager.update_stats("audio_with_image_received")
+
+                    # Save the image for verification
+                    saved_path = manager.image_manager.save_image(
+                        image_data, client_id, "multimodal"
+                    )
+                    if saved_path:
+                        # Verify the saved image
+                        verification = manager.image_manager.verify_image(saved_path)
+                        if verification.get("valid"):
+                            logger.info(
+                                f"📸 Image verified successfully: {verification['size']} pixels"
+                            )
+                        else:
+                            logger.warning(
+                                f"⚠️ Image verification failed: {verification}"
+                            )
+
+                else:
+                    logger.info(
+                        f"🎤 Processing audio-only segment: {len(audio_data)} bytes"
+                    )
+                    manager.update_stats("audio_segments_received")
 
                 # Send interrupt immediately since frontend determined this is valid speech
                 logger.info("Sending interrupt signal")
@@ -702,7 +848,12 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                     )
                     return
 
-                # Step 2: Process transcribed text with image using SmolVLM2
+                # Step 2: Set image if provided, then process text
+                if image_data:
+                    await smolvlm_processor.set_image(image_data)
+                    logger.info("🖼️ Image set for multimodal processing")
+
+                # Process transcribed text with image using SmolVLM2
                 logger.info("Starting SmolVLM2 generation")
                 streamer, initial_text, initial_collection_stopped_early = (
                     await smolvlm_processor.process_text_with_image(transcribed_text)
@@ -755,11 +906,12 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                             "word_timings": initial_timings,  # 🎉 NATIVE TIMING DATA!
                             "sample_rate": 24000,
                             "method": "native_kokoro_timing",
+                            "modality": "multimodal" if image_data else "audio_only",
                         }
 
                         await websocket.send_text(json.dumps(audio_message))
                         logger.info(
-                            f"✨ Initial audio sent to client with {len(initial_timings)} NATIVE word timings"
+                            f"✨ Initial audio sent to client with {len(initial_timings)} NATIVE word timings [{audio_message['modality']}]"
                         )
 
                         # Step 4: Process remaining text chunks if available
@@ -830,13 +982,18 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                                                 "sample_rate": 24000,
                                                 "method": "native_kokoro_timing",
                                                 "chunk": True,
+                                                "modality": (
+                                                    "multimodal"
+                                                    if image_data
+                                                    else "audio_only"
+                                                ),
                                             }
 
                                             await websocket.send_text(
                                                 json.dumps(chunk_audio_message)
                                             )
                                             logger.info(
-                                                f"✨ Chunk audio sent to client with {len(chunk_timings)} NATIVE word timings"
+                                                f"✨ Chunk audio sent to client with {len(chunk_timings)} NATIVE word timings [{chunk_audio_message['modality']}]"
                                             )
 
                                     except StopAsyncIteration:
@@ -878,7 +1035,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 
                         # Signal end of audio stream
                         await websocket.send_text(json.dumps({"audio_complete": True}))
-                        logger.info("Audio processing complete data")
+                        logger.info("Audio processing complete")
 
             except asyncio.CancelledError:
                 logger.info("Audio processing cancelled")
@@ -905,19 +1062,26 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 
                             # Decode audio data
                             audio_data = base64.b64decode(message["audio_segment"])
-                            logger.info(
-                                f"Received audio segment: {len(audio_data)} bytes"
-                            )
 
-                            # Start processing the audio segment
+                            # Check if image is also included
+                            image_data = None
+                            if "image" in message:
+                                image_data = base64.b64decode(message["image"])
+                                logger.info(
+                                    f"Received audio+image: audio={len(audio_data)} bytes, image={len(image_data)} bytes"
+                                )
+                            else:
+                                logger.info(
+                                    f"Received audio-only: {len(audio_data)} bytes"
+                                )
+
+                            # Start processing the audio segment with optional image
                             processing_task = asyncio.create_task(
-                                process_audio_segment(audio_data)
+                                process_audio_segment(audio_data, image_data)
                             )
                             manager.set_task(client_id, "processing", processing_task)
 
-                            # Don't await here - let it run in background
-
-                        # Handle images (only if not currently processing)
+                        # Handle standalone images (only if not currently processing)
                         elif "image" in message:
                             if not (
                                 client_id in manager.current_tasks
@@ -927,6 +1091,20 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                                 ].done()
                             ):
                                 image_data = base64.b64decode(message["image"])
+                                manager.update_stats("images_received")
+
+                                # Save standalone image
+                                saved_path = manager.image_manager.save_image(
+                                    image_data, client_id, "standalone"
+                                )
+                                if saved_path:
+                                    verification = manager.image_manager.verify_image(
+                                        saved_path
+                                    )
+                                    logger.info(
+                                        f"📸 Standalone image saved and verified: {verification}"
+                                    )
+
                                 await smolvlm_processor.set_image(image_data)
                                 logger.info("Image updated")
 
@@ -957,6 +1135,22 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                                         ].done()
                                     ):
                                         image_data = base64.b64decode(chunk["data"])
+                                        manager.update_stats("images_received")
+
+                                        # Save image from realtime input
+                                        saved_path = manager.image_manager.save_image(
+                                            image_data, client_id, "realtime"
+                                        )
+                                        if saved_path:
+                                            verification = (
+                                                manager.image_manager.verify_image(
+                                                    saved_path
+                                                )
+                                            )
+                                            logger.info(
+                                                f"📸 Realtime image saved and verified: {verification}"
+                                            )
+
                                         await smolvlm_processor.set_image(image_data)
 
                     except json.JSONDecodeError as e:

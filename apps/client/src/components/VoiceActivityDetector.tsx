@@ -1,7 +1,15 @@
 'use client';
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Mic, MicOff, Settings, ChevronDown, ChevronUp } from 'lucide-react';
+import {
+  Mic,
+  MicOff,
+  Settings,
+  ChevronDown,
+  ChevronUp,
+  Camera,
+  Send
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -32,12 +40,13 @@ interface VoiceActivityDetectorProps {
   cameraStream?: MediaStream | null;
 }
 
-// Voice Blob Component
+// Enhanced Voice Blob Component with transmission feedback
 const VoiceBlob: React.FC<{
   energy: number;
   isActive: boolean;
   threshold: number;
-}> = ({ energy, isActive, threshold }) => {
+  transmissionMode: 'audio' | 'audio+image' | 'none';
+}> = ({ energy, isActive, threshold, transmissionMode }) => {
   const [animationTime, setAnimationTime] = useState(0);
   const [isMounted, setIsMounted] = useState(false);
 
@@ -113,6 +122,31 @@ const VoiceBlob: React.FC<{
   const isAboveThreshold = energy > threshold;
   const displaySize = isMounted ? size : baseSize;
 
+  // Dynamic gradient based on transmission mode
+  const getGradientColors = () => {
+    if (transmissionMode === 'audio+image') {
+      return {
+        start: isAboveThreshold ? '#8b5cf6' : '#7c3aed', // Purple for audio+image
+        middle: isAboveThreshold ? '#7c3aed' : '#6d28d9',
+        end: isAboveThreshold ? '#6d28d9' : '#5b21b6'
+      };
+    } else if (transmissionMode === 'audio') {
+      return {
+        start: isAboveThreshold ? '#10b981' : '#3b82f6', // Green/Blue for audio only
+        middle: isAboveThreshold ? '#059669' : '#1d4ed8',
+        end: isAboveThreshold ? '#047857' : '#1e40af'
+      };
+    } else {
+      return {
+        start: '#6b7280', // Gray for no transmission
+        middle: '#4b5563',
+        end: '#374151'
+      };
+    }
+  };
+
+  const colors = getGradientColors();
+
   return (
     <div className="flex flex-col items-center space-y-4">
       <div className="relative">
@@ -123,21 +157,9 @@ const VoiceBlob: React.FC<{
         >
           <defs>
             <radialGradient id="blobGradient" cx="50%" cy="50%">
-              <stop
-                offset="0%"
-                stopColor={isAboveThreshold ? '#10b981' : '#3b82f6'}
-                stopOpacity="0.8"
-              />
-              <stop
-                offset="70%"
-                stopColor={isAboveThreshold ? '#059669' : '#1d4ed8'}
-                stopOpacity="0.6"
-              />
-              <stop
-                offset="100%"
-                stopColor={isAboveThreshold ? '#047857' : '#1e40af'}
-                stopOpacity="0.3"
-              />
+              <stop offset="0%" stopColor={colors.start} stopOpacity="0.8" />
+              <stop offset="70%" stopColor={colors.middle} stopOpacity="0.6" />
+              <stop offset="100%" stopColor={colors.end} stopOpacity="0.3" />
             </radialGradient>
 
             <filter id="glow">
@@ -167,24 +189,101 @@ const VoiceBlob: React.FC<{
             fill="white"
             opacity={0.9}
           />
+
+          {/* Transmission indicator overlay */}
+          {transmissionMode !== 'none' && (
+            <g
+              transform={`translate(${(maxSize + 20) / 2 - 12}, ${(maxSize + 20) / 2 + 25})`}
+            >
+              {transmissionMode === 'audio+image' ? (
+                <>
+                  <Camera size={12} fill="white" opacity={0.8} />
+                  <Send size={8} x={14} fill="white" opacity={0.8} />
+                </>
+              ) : (
+                <Send size={12} fill="white" opacity={0.8} />
+              )}
+            </g>
+          )}
         </svg>
       </div>
 
       <div className="text-center">
         <div
           className={`font-mono text-2xl font-bold transition-colors duration-200 ${
-            isAboveThreshold ? 'text-green-600' : 'text-blue-600'
+            transmissionMode === 'audio+image'
+              ? 'text-purple-600'
+              : isAboveThreshold
+                ? 'text-green-600'
+                : 'text-blue-600'
           }`}
         >
           {energy.toFixed(4)}
         </div>
         <p className="text-muted-foreground text-sm">Energy Level</p>
-        <Badge
-          variant={isAboveThreshold ? 'default' : 'secondary'}
-          className="mt-1"
-        >
-          {isAboveThreshold ? 'Above Threshold' : 'Below Threshold'}
-        </Badge>
+        <div className="mt-1 flex flex-col gap-1">
+          <Badge
+            variant={isAboveThreshold ? 'default' : 'secondary'}
+            className="text-xs"
+          >
+            {isAboveThreshold ? 'Above Threshold' : 'Below Threshold'}
+          </Badge>
+          <Badge
+            variant={transmissionMode === 'audio+image' ? 'default' : 'outline'}
+            className={`text-xs ${
+              transmissionMode === 'audio+image'
+                ? 'bg-purple-500 hover:bg-purple-600'
+                : transmissionMode === 'audio'
+                  ? 'bg-blue-500 hover:bg-blue-600'
+                  : ''
+            }`}
+          >
+            {transmissionMode === 'audio+image'
+              ? '🎥 Audio + Image'
+              : transmissionMode === 'audio'
+                ? '🎤 Audio Only'
+                : '🔇 No Transmission'}
+          </Badge>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Transmission History Component
+const TransmissionHistory: React.FC<{
+  transmissions: Array<{
+    timestamp: Date;
+    type: 'audio' | 'audio+image';
+    audioSize: number;
+    imageSize?: number;
+  }>;
+}> = ({ transmissions }) => {
+  if (transmissions.length === 0) return null;
+
+  return (
+    <div className="mt-4 rounded-lg bg-gray-50 p-3">
+      <h4 className="mb-2 text-sm font-medium">Recent Transmissions</h4>
+      <div className="max-h-32 space-y-1 overflow-y-auto">
+        {transmissions
+          .slice(-5)
+          .reverse()
+          .map((transmission, index) => (
+            <div
+              key={index}
+              className="flex items-center justify-between text-xs"
+            >
+              <span className="flex items-center gap-1">
+                {transmission.type === 'audio+image' ? '🎥' : '🎤'}
+                {transmission.timestamp.toLocaleTimeString()}
+              </span>
+              <span className="text-gray-500">
+                {transmission.type === 'audio+image'
+                  ? `Audio: ${(transmission.audioSize / 1024).toFixed(1)}KB + Image: ${((transmission.imageSize || 0) / 1024).toFixed(1)}KB`
+                  : `Audio: ${(transmission.audioSize / 1024).toFixed(1)}KB`}
+              </span>
+            </div>
+          ))}
       </div>
     </div>
   );
@@ -197,6 +296,18 @@ const VoiceActivityDetector: React.FC<VoiceActivityDetectorProps> = ({
   const [currentEnergy, setCurrentEnergy] = useState(0);
   const [isSpeechActive, setIsSpeechActive] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [transmissionMode, setTransmissionMode] = useState<
+    'audio' | 'audio+image' | 'none'
+  >('none');
+  const [transmissionHistory, setTransmissionHistory] = useState<
+    Array<{
+      timestamp: Date;
+      type: 'audio' | 'audio+image';
+      audioSize: number;
+      imageSize?: number;
+    }>
+  >([]);
+
   const [config, setConfig] = useState<VADConfig>({
     energyThreshold: 0.02,
     conversationBreakDuration: 2.5,
@@ -231,31 +342,67 @@ const VoiceActivityDetector: React.FC<VoiceActivityDetectorProps> = ({
     connect();
   }, [connect]);
 
+  // Update transmission mode based on camera stream
+  useEffect(() => {
+    if (!isListening) {
+      setTransmissionMode('none');
+    } else if (cameraStream) {
+      setTransmissionMode('audio+image');
+    } else {
+      setTransmissionMode('audio');
+    }
+  }, [isListening, cameraStream]);
+
   // Capture image from camera stream
-  const captureImageFromStream = useCallback((): string | null => {
+  const captureImageFromStream = useCallback((): {
+    data: string;
+    size: number;
+  } | null => {
     if (!cameraStream) return null;
 
     try {
-      const video = document.createElement('video');
-      video.srcObject = cameraStream;
-      video.play();
+      // Try to find existing video element in CameraStream component
+      const existingVideo = document.querySelector(
+        'video[autoplay]'
+      ) as HTMLVideoElement;
 
-      const canvas = document.createElement('canvas');
-      canvas.width = 320;
-      canvas.height = 240;
-      const ctx = canvas.getContext('2d');
+      if (
+        existingVideo &&
+        existingVideo.videoWidth > 0 &&
+        existingVideo.videoHeight > 0
+      ) {
+        // Use existing video element that's already playing
+        const canvas = document.createElement('canvas');
+        const aspectRatio =
+          existingVideo.videoWidth / existingVideo.videoHeight;
+        canvas.width = 320;
+        canvas.height = Math.round(320 / aspectRatio);
 
-      if (ctx) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        return canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(existingVideo, 0, 0, canvas.width, canvas.height);
+
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+          const base64Data = dataUrl.split(',')[1];
+          const size = base64Data.length * 0.75;
+
+          console.log(
+            `📸 Captured from existing video: ${canvas.width}x${canvas.height}, ${size.toFixed(0)} bytes`
+          );
+
+          return { data: base64Data, size };
+        }
       }
+
+      console.warn('No suitable video element found for capture');
+      return null;
     } catch (error) {
-      console.error('Error capturing image:', error);
+      console.error('Error capturing from existing video:', error);
+      return null;
     }
-    return null;
   }, [cameraStream]);
 
-  // Create audio blob and send to WebSocket
+  // Enhanced audio sending with transmission tracking
   const createAndSendAudio = useCallback(
     (audioBuffers: Float32Array[]) => {
       if (!isConnected) return;
@@ -282,17 +429,31 @@ const VoiceActivityDetector: React.FC<VoiceActivityDetectorProps> = ({
       }
 
       const audioData = int16Buffer.buffer;
+      const audioSize = audioData.byteLength;
 
       // Send with or without image based on camera state
-      const imageData = captureImageFromStream();
+      const imageCapture = captureImageFromStream();
 
-      if (imageData) {
-        sendAudioWithImage(audioData, imageData);
-        console.log('Sent audio + image to server');
+      const transmission = {
+        timestamp: new Date(),
+        audioSize,
+        type: imageCapture ? ('audio+image' as const) : ('audio' as const),
+        imageSize: imageCapture?.size
+      };
+
+      if (imageCapture) {
+        sendAudioWithImage(audioData, imageCapture.data);
+        console.log('Sent audio + image to server', {
+          audioSize: audioSize,
+          imageSize: imageCapture.size
+        });
       } else {
         sendAudioSegment(audioData);
-        console.log('Sent audio to server');
+        console.log('Sent audio to server', { audioSize });
       }
+
+      // Update transmission history
+      setTransmissionHistory((prev) => [...prev, transmission].slice(-20)); // Keep last 20
     },
     [isConnected, sendAudioSegment, sendAudioWithImage, captureImageFromStream]
   );
@@ -555,7 +716,7 @@ const VoiceActivityDetector: React.FC<VoiceActivityDetectorProps> = ({
           </Button>
         </div>
 
-        {/* Status Indicators */}
+        {/* Enhanced Status Indicators */}
         <div className="flex justify-center space-x-8">
           <div className="text-center">
             <div
@@ -591,14 +752,18 @@ const VoiceActivityDetector: React.FC<VoiceActivityDetectorProps> = ({
           </div>
         </div>
 
-        {/* Voice Activity Blob */}
+        {/* Enhanced Voice Activity Blob */}
         <div className="flex justify-center">
           <VoiceBlob
             energy={currentEnergy}
             isActive={isSpeechActive}
             threshold={config.energyThreshold}
+            transmissionMode={transmissionMode}
           />
         </div>
+
+        {/* Transmission History */}
+        <TransmissionHistory transmissions={transmissionHistory} />
 
         {/* Settings */}
         <Collapsible open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>

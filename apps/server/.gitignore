@@ -23,3 +23,6 @@ build/
 .env
 .env.*
 !.env.example
+
+# Folders
+received_images/
