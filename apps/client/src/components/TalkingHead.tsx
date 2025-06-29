@@ -409,9 +409,7 @@ const TalkingHead: React.FC<TalkingHeadProps> = ({
     <Card className={`w-full ${className}`}>
       <CardHeader className="text-center">
         <CardTitle className="text-2xl font-bold">AI Avatar</CardTitle>
-        <CardDescription>
-          Voice-controlled 3D avatar with native timing
-        </CardDescription>
+        <CardDescription>Voice-controlled 3D avatar</CardDescription>
       </CardHeader>
 
       <CardContent className="space-y-6">
