@@ -13,7 +13,7 @@
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 
-![TalkMateAI Interface](./images/screenshot.png)
+![TalkMateAI Interface](https://github.com/kiranbaby14/TalkMateAI/blob/master/images/Screenshot.png)
 
 ## ✨ Features
 
