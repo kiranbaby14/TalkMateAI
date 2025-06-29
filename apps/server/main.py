@@ -344,19 +344,20 @@ class KokoroTTSProcessor:
             logger.error(f"Error initializing Kokoro TTS: {e}")
             self.pipeline = None
 
-    async def synthesize_initial_speech(self, text):
-        """Convert initial text to speech using Kokoro TTS with minimal splitting for speed"""
+    async def synthesize_initial_speech_with_timing(self, text):
+        """Convert initial text to speech using Kokoro TTS data"""
         if not text or not self.pipeline:
-            return None
+            return None, []
 
         try:
             logger.info(f"Synthesizing initial speech for text: '{text}'")
 
             # Run TTS in a thread pool to avoid blocking
             audio_segments = []
+            all_word_timings = []
+            time_offset = 0  # Track cumulative time for multiple segments
 
             # Use the executor to run the TTS pipeline with minimal splitting
-            # For initial text, we want to process it quickly with minimal splits
             generator = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.pipeline(
@@ -367,28 +368,65 @@ class KokoroTTSProcessor:
                 ),
             )
 
-            # Process all generated segments
-            for gs, ps, audio in generator:
+            # Process all generated segments and extract NATIVE timing
+            for i, result in enumerate(generator):
+                # Extract the components as shown in your screenshot
+                gs = result.graphemes  # str - the text graphemes
+                ps = result.phonemes  # str - the phonemes
+                audio = result.audio.cpu().numpy()  # numpy array
+                tokens = result.tokens  # List[en.MToken] - THE TIMING GOLD!
+
+                logger.info(
+                    f"Segment {i}: {len(tokens)} tokens, audio shape: {audio.shape}"
+                )
+
+                # Extract word timing from native tokens with null checks
+                for token in tokens:
+                    # Check if timing data is available
+                    if token.start_ts is not None and token.end_ts is not None:
+                        word_timing = {
+                            "word": token.text,
+                            "start_time": (token.start_ts + time_offset)
+                            * 1000,  # Convert to milliseconds
+                            "end_time": (token.end_ts + time_offset)
+                            * 1000,  # Convert to milliseconds
+                        }
+                        all_word_timings.append(word_timing)
+                        logger.debug(
+                            f"Word: '{token.text}' Start: {word_timing['start_time']:.1f}ms End: {word_timing['end_time']:.1f}ms"
+                        )
+                    else:
+                        # Log when timing data is missing
+                        logger.debug(
+                            f"Word: '{token.text}' - No timing data available (start_ts: {token.start_ts}, end_ts: {token.end_ts})"
+                        )
+
+                # Add audio segment
                 audio_segments.append(audio)
+
+                # Update time offset for next segment
+                if len(audio) > 0:
+                    segment_duration = len(audio) / 24000  # seconds
+                    time_offset += segment_duration
 
             # Combine all audio segments
             if audio_segments:
                 combined_audio = np.concatenate(audio_segments)
                 self.synthesis_count += 1
                 logger.info(
-                    f"Initial speech synthesis complete: {len(combined_audio)} samples"
+                    f"✨ Initial speech synthesis complete: {len(combined_audio)} samples, {len(all_word_timings)} word timings"
                 )
-                return combined_audio
-            return None
+                return combined_audio, all_word_timings
+            return None, []
 
         except Exception as e:
-            logger.error(f"Initial speech synthesis error: {e}")
-            return None
+            logger.error(f"Initial speech synthesis with timing error: {e}")
+            return None, []
 
-    async def synthesize_remaining_speech(self, text):
-        """Convert remaining text to speech using Kokoro TTS with optimized splitting for responsive streaming"""
+    async def synthesize_remaining_speech_with_timing(self, text):
+        """Convert remaining text to speech using Kokoro TTS data"""
         if not text or not self.pipeline:
-            return None
+            return None, []
 
         try:
             logger.info(
@@ -397,13 +435,13 @@ class KokoroTTSProcessor:
 
             # Run TTS in a thread pool to avoid blocking
             audio_segments = []
+            all_word_timings = []
+            time_offset = 0  # Track cumulative time for multiple segments
 
             # Determine appropriate split pattern based on text length
-            # For shorter chunks, use minimal splitting to process faster
             if len(text) < 100:
                 split_pattern = None  # No splitting for very short chunks
             else:
-                # Use appropriate punctuation for sentence-level splitting
                 split_pattern = r"[.!?。！？]+"
 
             # Use the executor to run the TTS pipeline with optimized splitting
@@ -414,23 +452,60 @@ class KokoroTTSProcessor:
                 ),
             )
 
-            # Process all generated segments
-            for gs, ps, audio in generator:
+            # Process all generated segments and extract NATIVE timing
+            for i, result in enumerate(generator):
+                # Extract the components with NATIVE timing
+                gs = result.graphemes  # str
+                ps = result.phonemes  # str
+                audio = result.audio.cpu().numpy()  # numpy array
+                tokens = result.tokens  # List[en.MToken] - THE TIMING GOLD!
+
+                logger.info(
+                    f"Chunk segment {i}: {len(tokens)} tokens, audio shape: {audio.shape}"
+                )
+
+                # Extract word timing from native tokens with null checks
+                for token in tokens:
+                    # Check if timing data is available
+                    if token.start_ts is not None and token.end_ts is not None:
+                        word_timing = {
+                            "word": token.text,
+                            "start_time": (token.start_ts + time_offset)
+                            * 1000,  # Convert to milliseconds
+                            "end_time": (token.end_ts + time_offset)
+                            * 1000,  # Convert to milliseconds
+                        }
+                        all_word_timings.append(word_timing)
+                        logger.debug(
+                            f"Chunk word: '{token.text}' Start: {word_timing['start_time']:.1f}ms End: {word_timing['end_time']:.1f}ms"
+                        )
+                    else:
+                        # Log when timing data is missing
+                        logger.debug(
+                            f"Chunk word: '{token.text}' - No timing data available (start_ts: {token.start_ts}, end_ts: {token.end_ts})"
+                        )
+
+                # Add audio segment
                 audio_segments.append(audio)
+
+                # Update time offset for next segment
+                if len(audio) > 0:
+                    segment_duration = len(audio) / 24000  # seconds
+                    time_offset += segment_duration
 
             # Combine all audio segments
             if audio_segments:
                 combined_audio = np.concatenate(audio_segments)
                 self.synthesis_count += 1
                 logger.info(
-                    f"Chunk speech synthesis complete: {len(combined_audio)} samples"
+                    f"✨ Chunk speech synthesis complete: {len(combined_audio)} samples, {len(all_word_timings)} word timings"
                 )
-                return combined_audio
-            return None
+                return combined_audio, all_word_timings
+            return None, []
 
         except Exception as e:
-            logger.error(f"Chunk speech synthesis error: {e}")
-            return None
+            logger.error(f"Chunk speech synthesis with timing error: {e}")
+            return None, []
 
 
 async def collect_remaining_text(streamer, chunk_size=80):
@@ -643,26 +718,49 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                     )
                     return
 
-                # Step 3: Generate TTS for initial text
+                # Step 3: Generate TTS for initial text WITH NATIVE TIMING
                 if initial_text:
                     logger.info("Starting TTS for initial text")
                     tts_task = asyncio.create_task(
-                        tts_processor.synthesize_initial_speech(initial_text)
+                        tts_processor.synthesize_initial_speech_with_timing(
+                            initial_text
+                        )
                     )
                     manager.set_task(client_id, "tts", tts_task)
 
-                    initial_audio = await tts_task
+                    # FIXED: Properly unpack the tuple
+                    tts_result = await tts_task
+                    if isinstance(tts_result, tuple) and len(tts_result) == 2:
+                        initial_audio, initial_timings = tts_result
+                    else:
+                        # Fallback for legacy method
+                        initial_audio = tts_result
+                        initial_timings = []
+                        logger.warning(
+                            "TTS returned single value instead of tuple - no timing data available"
+                        )
+
                     logger.info(
-                        f"Initial TTS complete: {len(initial_audio) if len(initial_audio) else 0} samples"
+                        f"Initial TTS complete: {len(initial_audio) if initial_audio is not None else 0} samples, {len(initial_timings)} word timings"
                     )
 
                     if initial_audio is not None and len(initial_audio) > 0:
-                        # Convert to base64 and send to client
+                        # Convert to base64 and send to client WITH TIMING DATA
                         audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
                         base64_audio = base64.b64encode(audio_bytes).decode("utf-8")
 
-                        await websocket.send_text(json.dumps({"audio": base64_audio}))
-                        logger.info("Initial audio sent to client")
+                        # Send audio with native timing information
+                        audio_message = {
+                            "audio": base64_audio,
+                            "word_timings": initial_timings,  # 🎉 NATIVE TIMING DATA!
+                            "sample_rate": 24000,
+                            "method": "native_kokoro_timing",
+                        }
+
+                        await websocket.send_text(json.dumps(audio_message))
+                        logger.info(
+                            f"✨ Initial audio sent to client with {len(initial_timings)} NATIVE word timings"
+                        )
 
                         # Step 4: Process remaining text chunks if available
                         if initial_collection_stopped_early:
@@ -680,9 +778,9 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                                         )
                                         collected_chunks.append(text_chunk)
 
-                                        # Generate TTS for this chunk
+                                        # Generate TTS for this chunk WITH NATIVE TIMING
                                         chunk_tts_task = asyncio.create_task(
-                                            tts_processor.synthesize_remaining_speech(
+                                            tts_processor.synthesize_remaining_speech_with_timing(
                                                 text_chunk
                                             )
                                         )
@@ -690,16 +788,32 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                                             client_id, "tts", chunk_tts_task
                                         )
 
-                                        chunk_audio = await chunk_tts_task
+                                        # FIXED: Properly unpack the tuple for chunks too
+                                        chunk_tts_result = await chunk_tts_task
+                                        if (
+                                            isinstance(chunk_tts_result, tuple)
+                                            and len(chunk_tts_result) == 2
+                                        ):
+                                            chunk_audio, chunk_timings = (
+                                                chunk_tts_result
+                                            )
+                                        else:
+                                            # Fallback for legacy method
+                                            chunk_audio = chunk_tts_result
+                                            chunk_timings = []
+                                            logger.warning(
+                                                "Chunk TTS returned single value instead of tuple"
+                                            )
+
                                         logger.info(
-                                            f"Chunk TTS complete: {len(chunk_audio) if len(chunk_audio) else 0} samples"
+                                            f"Chunk TTS complete: {len(chunk_audio) if chunk_audio is not None else 0} samples, {len(chunk_timings)} word timings"
                                         )
 
                                         if (
                                             chunk_audio is not None
                                             and len(chunk_audio) > 0
                                         ):
-                                            # Convert to base64 and send to client
+                                            # Convert to base64 and send to client WITH TIMING DATA
                                             audio_bytes = (
                                                 (chunk_audio * 32767)
                                                 .astype(np.int16)
@@ -709,10 +823,21 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                                                 audio_bytes
                                             ).decode("utf-8")
 
+                                            # Send chunk audio with native timing information
+                                            chunk_audio_message = {
+                                                "audio": base64_audio,
+                                                "word_timings": chunk_timings,  # 🎉 NATIVE TIMING DATA!
+                                                "sample_rate": 24000,
+                                                "method": "native_kokoro_timing",
+                                                "chunk": True,
+                                            }
+
                                             await websocket.send_text(
-                                                json.dumps({"audio": base64_audio})
+                                                json.dumps(chunk_audio_message)
                                             )
-                                            logger.info("Chunk audio sent to client")
+                                            logger.info(
+                                                f"✨ Chunk audio sent to client with {len(chunk_timings)} NATIVE word timings"
+                                            )
 
                                     except StopAsyncIteration:
                                         logger.info("All text chunks processed")
@@ -753,13 +878,17 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 
                         # Signal end of audio stream
                         await websocket.send_text(json.dumps({"audio_complete": True}))
-                        logger.info("Audio processing complete")
+                        logger.info("Audio processing complete data")
 
             except asyncio.CancelledError:
                 logger.info("Audio processing cancelled")
                 raise
             except Exception as e:
                 logger.error(f"Error processing audio segment: {e}")
+                # Add more detailed error info
+                import traceback
+
+                logger.error(f"Full traceback: {traceback.format_exc()}")
 
         async def receive_and_process():
             """Receive and process messages from the client"""
