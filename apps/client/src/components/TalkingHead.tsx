@@ -1,14 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import {
-  Play,
-  Square,
-  Settings,
-  ChevronDown,
-  ChevronUp,
-  Loader2
-} from 'lucide-react';
+import { Loader2, Settings, ChevronDown, ChevronUp } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -30,47 +23,36 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select';
-import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Separator } from '@/components/ui/separator';
+import { useWebSocketContext } from '@/contexts/WebSocketContext';
 
 interface TalkingHeadProps {
   className?: string;
-  onClose?: () => void;
+  cameraStream?: MediaStream | null;
 }
 
 const TalkingHead: React.FC<TalkingHeadProps> = ({
   className = '',
-  onClose
+  cameraStream
 }) => {
   const avatarRef = useRef<HTMLDivElement>(null);
+  const headRef = useRef<any>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioQueueRef = useRef<any[]>([]);
+  const isPlayingAudioRef = useRef(false);
+
   const [isLoading, setIsLoading] = useState(true);
   const [status, setStatus] = useState<{
     message: string;
     type: 'success' | 'error' | 'info';
   } | null>(null);
-  const [selectedVoice, setSelectedVoice] = useState('af_sarah');
+
   const [selectedAvatar, setSelectedAvatar] = useState('F');
   const [selectedMood, setSelectedMood] = useState('neutral');
-  const [textInput, setTextInput] = useState(
-    "Hello! I'm using Kokoro TTS with TalkingHead. This combination provides high-quality, natural-sounding speech with real-time lip synchronization."
-  );
-  const [isSpeaking, setIsSpeaking] = useState(false);
   const [scriptsLoaded, setScriptsLoaded] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-
-  const headRef = useRef<any>(null);
-  const kokoroEndpoint = 'http://localhost:8000';
-
-  // Voice options
-  const voiceOptions = [
-    { value: 'af_sarah', label: 'Sarah (Female)' },
-    { value: 'af_nicole', label: 'Nicole (Female)' },
-    { value: 'af_sky', label: 'Sky (Female)' },
-    { value: 'am_adam', label: 'Adam (Male)' },
-    { value: 'am_michael', label: 'Michael (Male)' }
-  ];
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   const avatarOptions = [
     { value: 'F', label: 'Female Avatar' },
@@ -85,7 +67,18 @@ const TalkingHead: React.FC<TalkingHeadProps> = ({
     { value: 'love', label: 'Love' }
   ];
 
-  // Show status message
+  // Get WebSocket context
+  const {
+    isConnected,
+    isConnecting,
+    connect,
+    disconnect,
+    onAudioReceived,
+    onInterrupt,
+    onError,
+    onStatusChange
+  } = useWebSocketContext();
+
   const showStatus = (message: string, type: 'success' | 'error' | 'info') => {
     setStatus({ message, type });
     if (type === 'success' || type === 'info') {
@@ -93,28 +86,234 @@ const TalkingHead: React.FC<TalkingHeadProps> = ({
     }
   };
 
+  // Initialize audio context
+  const initAudioContext = useCallback(async () => {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext({ sampleRate: 22050 });
+    }
+    if (audioContextRef.current.state === 'suspended') {
+      await audioContextRef.current.resume();
+    }
+  }, []);
+
+  // Convert base64 to ArrayBuffer
+  const base64ToArrayBuffer = useCallback((base64: string) => {
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+  }, []);
+
+  // Convert Int16Array to Float32Array
+  const int16ArrayToFloat32 = useCallback((int16Array: Int16Array) => {
+    const float32Array = new Float32Array(int16Array.length);
+    for (let i = 0; i < int16Array.length; i++) {
+      float32Array[i] = int16Array[i] / 32768.0;
+    }
+    return float32Array;
+  }, []);
+
+  // Play next audio in queue
+  const playNextAudio = useCallback(async () => {
+    if (audioQueueRef.current.length === 0) {
+      isPlayingAudioRef.current = false;
+      setIsSpeaking(false);
+      return;
+    }
+
+    isPlayingAudioRef.current = true;
+    setIsSpeaking(true);
+
+    const audioItem = audioQueueRef.current.shift();
+    console.log('Playing audio item:', audioItem);
+
+    try {
+      if (
+        headRef.current &&
+        audioItem.timingData &&
+        audioItem.timingData.words
+      ) {
+        // Use TalkingHead with native timing
+        const speakData = {
+          audio: audioItem.buffer,
+          words: audioItem.timingData.words,
+          wtimes: audioItem.timingData.word_times,
+          wdurations: audioItem.timingData.word_durations
+        };
+
+        console.log('Using TalkingHead with timing data:', speakData);
+        headRef.current.speakAudio(speakData);
+
+        // Set timer for next audio
+        setTimeout(() => {
+          console.log('TalkingHead audio finished, playing next...');
+          playNextAudio();
+        }, audioItem.duration * 1000);
+      } else if (headRef.current) {
+        // Basic TalkingHead audio without timing
+        console.log('Using basic TalkingHead audio');
+        headRef.current.speakAudio({ audio: audioItem.buffer });
+
+        setTimeout(() => {
+          console.log('Basic TalkingHead audio finished, playing next...');
+          playNextAudio();
+        }, audioItem.duration * 1000);
+      } else {
+        // Fallback to Web Audio API
+        console.log('Using Web Audio API fallback');
+        await initAudioContext();
+        const source = audioContextRef.current!.createBufferSource();
+        source.buffer = audioItem.buffer;
+        source.connect(audioContextRef.current!.destination);
+        source.onended = () => {
+          console.log('Web Audio finished, playing next...');
+          playNextAudio();
+        };
+        source.start();
+      }
+    } catch (error) {
+      console.error('Error playing audio:', error);
+      // Continue to next audio on error
+      setTimeout(() => playNextAudio(), 100);
+    }
+  }, [initAudioContext]);
+
+  // Handle audio from WebSocket
+  const handleAudioReceived = useCallback(
+    async (
+      base64Audio: string,
+      timingData?: any,
+      sampleRate = 24000,
+      method = 'unknown'
+    ) => {
+      console.log('🎵 TALKINGHEAD handleAudioReceived CALLED!', {
+        audioLength: base64Audio.length,
+        timingData,
+        sampleRate,
+        method
+      });
+
+      try {
+        await initAudioContext();
+
+        // Convert base64 to audio buffer
+        const arrayBuffer = base64ToArrayBuffer(base64Audio);
+        const int16Array = new Int16Array(arrayBuffer);
+        const float32Array = int16ArrayToFloat32(int16Array);
+
+        console.log('Audio conversion successful:', {
+          arrayBufferLength: arrayBuffer.byteLength,
+          int16Length: int16Array.length,
+          float32Length: float32Array.length
+        });
+
+        // Create AudioBuffer
+        const audioBuffer = audioContextRef.current!.createBuffer(
+          1,
+          float32Array.length,
+          sampleRate
+        );
+        audioBuffer.copyToChannel(float32Array, 0);
+
+        console.log('AudioBuffer created:', {
+          duration: audioBuffer.duration,
+          sampleRate: audioBuffer.sampleRate,
+          length: audioBuffer.length
+        });
+
+        // Add to queue
+        audioQueueRef.current.push({
+          buffer: audioBuffer,
+          timingData: timingData,
+          duration: audioBuffer.duration,
+          method: method
+        });
+
+        console.log(
+          'Audio added to queue. Queue length:',
+          audioQueueRef.current.length
+        );
+
+        // Start playing if not already playing
+        if (!isPlayingAudioRef.current) {
+          console.log('Starting audio playback...');
+          playNextAudio();
+        } else {
+          console.log('Audio already playing, added to queue');
+        }
+
+        const timingInfo = timingData
+          ? ` with ${timingData.words?.length || 0} word timings`
+          : ' (no timing)';
+        console.log(
+          `✅ Audio queued successfully: ${audioBuffer.duration.toFixed(2)}s${timingInfo} [${method}]`
+        );
+      } catch (error) {
+        console.error(
+          '❌ Error processing audio in handleAudioReceived:',
+          error
+        );
+      }
+    },
+    [initAudioContext, base64ToArrayBuffer, int16ArrayToFloat32, playNextAudio]
+  );
+
+  // Handle interrupt from server
+  const handleInterrupt = useCallback(() => {
+    // Clear audio queue
+    audioQueueRef.current = [];
+    isPlayingAudioRef.current = false;
+    setIsSpeaking(false);
+
+    // Stop TalkingHead if speaking
+    // if (headRef.current) {
+    //   try {
+    //     headRef.current.stop();
+    //   } catch (error) {
+    //     console.error('Error stopping TalkingHead:', error);
+    //   }
+    // }
+
+    console.log('Audio interrupted and cleared');
+  }, []);
+
+  // Register WebSocket callbacks
+  useEffect(() => {
+    onAudioReceived(handleAudioReceived);
+    onInterrupt(handleInterrupt);
+    onError((error) => showStatus(`WebSocket error: ${error}`, 'error'));
+    onStatusChange((status) => {
+      if (status === 'connected')
+        showStatus('Connected to voice assistant', 'success');
+      if (status === 'disconnected')
+        showStatus('Disconnected from server', 'info');
+    });
+  }, [
+    onAudioReceived,
+    onInterrupt,
+    onError,
+    onStatusChange,
+    handleAudioReceived,
+    handleInterrupt
+  ]);
+
   // Listen for TalkingHead library to load
   useEffect(() => {
     const handleTalkingHeadLoaded = () => {
-      console.log('TalkingHead library loaded');
       setScriptsLoaded(true);
     };
 
     const handleTalkingHeadError = () => {
-      console.error('Failed to load TalkingHead library');
-      showStatus(
-        'Failed to load TalkingHead library. Please check your internet connection.',
-        'error'
-      );
+      showStatus('Failed to load TalkingHead library', 'error');
     };
 
-    // Check if already loaded
     if ((window as any).TalkingHead) {
       setScriptsLoaded(true);
       return;
     }
 
-    // Listen for load events
     window.addEventListener('talkinghead-loaded', handleTalkingHeadLoaded);
     window.addEventListener('talkinghead-error', handleTalkingHeadError);
 
@@ -124,22 +323,20 @@ const TalkingHead: React.FC<TalkingHeadProps> = ({
     };
   }, []);
 
-  // Initialize TalkingHead after scripts are loaded
+  // Initialize TalkingHead
   useEffect(() => {
     if (!scriptsLoaded || !avatarRef.current) return;
 
     const initTalkingHead = async () => {
       try {
         setIsLoading(true);
-        showStatus('Initializing TalkingHead...', 'info');
+        showStatus('Initializing avatar...', 'info');
 
         const TalkingHead = (window as any).TalkingHead;
-
         if (!TalkingHead) {
           throw new Error('TalkingHead library not loaded');
         }
 
-        // Initialize TalkingHead
         headRef.current = new TalkingHead(avatarRef.current, {
           ttsEndpoint: 'https://texttospeech.googleapis.com/v1/text:synthesize',
           jwtGet: () => Promise.resolve('dummy-jwt-token'),
@@ -147,155 +344,50 @@ const TalkingHead: React.FC<TalkingHeadProps> = ({
           lipsyncLang: 'en',
           modelFPS: 30,
           cameraView: 'full',
-          avatarMute: false
+          avatarMute: false,
+          avatarMood: selectedMood
         });
 
-        // Load default avatar
         await loadAvatar(selectedAvatar);
-
         setIsLoading(false);
-        showStatus('TalkingHead initialized successfully!', 'success');
+        showStatus('Avatar ready!', 'success');
+
+        // Auto-connect to WebSocket
+        connect();
       } catch (error: any) {
         setIsLoading(false);
-        showStatus(`Initialization failed: ${error.message}`, 'error');
-        console.error('Initialization error:', error);
+        showStatus(`Failed to initialize: ${error.message}`, 'error');
       }
     };
 
     initTalkingHead();
 
     return () => {
-      // Cleanup
       if (headRef.current) {
         try {
           headRef.current.stop();
         } catch (error) {
-          console.error('Error during cleanup:', error);
+          console.error('Cleanup error:', error);
         }
       }
     };
-  }, [scriptsLoaded]);
+  }, [scriptsLoaded, connect]);
 
   const loadAvatar = async (gender: string = 'F') => {
     const avatarUrls = {
-      F: './avatars/brunette.glb',
-      M: './avatars/brunette.glb'
+      F: 'https://models.readyplayer.me/64bfa15f0e72c63d7c3934a6.glb?morphTargets=ARKit,Oculus+Visemes,mouthOpen,mouthSmile,eyesClosed,eyesLookUp,eyesLookDown&textureSizeLimit=1024&textureFormat=png',
+      M: 'https://models.readyplayer.me/638df5d0d72bffc6fa179441.glb'
     };
 
     try {
-      console.log(
-        `Loading ${gender} avatar:`,
-        avatarUrls[gender as keyof typeof avatarUrls]
-      );
-
       await headRef.current?.showAvatar({
         url: avatarUrls[gender as keyof typeof avatarUrls],
         body: gender,
         avatarMood: selectedMood,
         lipsyncLang: 'en'
       });
-
-      console.log(`${gender} avatar loaded successfully`);
     } catch (error: any) {
-      console.error(`Failed to load ${gender} avatar:`, error);
       showStatus(`Failed to load avatar: ${error.message}`, 'error');
-    }
-  };
-
-  const generateAudio = async (text: string, voice: string) => {
-    return fetch(`${kokoroEndpoint}/tts/audio`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        text: text,
-        voice: voice,
-        lang_code: 'a'
-      })
-    });
-  };
-
-  const getTimingInfo = async (text: string, voice: string) => {
-    return fetch(`${kokoroEndpoint}/tts/info`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        text: text,
-        voice: voice,
-        lang_code: 'a'
-      })
-    });
-  };
-
-  const speak = async () => {
-    if (!headRef.current) {
-      showStatus('TalkingHead not initialized yet', 'error');
-      return;
-    }
-
-    const text = textInput.trim();
-
-    if (!text) {
-      showStatus('Please enter some text to speak', 'error');
-      return;
-    }
-
-    try {
-      setIsSpeaking(true);
-      showStatus('Generating speech with Kokoro TTS...', 'info');
-
-      // Get audio and timing info from Kokoro TTS
-      const [audioResponse, infoResponse] = await Promise.all([
-        generateAudio(text, selectedVoice),
-        getTimingInfo(text, selectedVoice)
-      ]);
-
-      if (!audioResponse.ok) {
-        throw new Error(`Audio generation failed: ${audioResponse.status}`);
-      }
-
-      if (!infoResponse.ok) {
-        throw new Error(`Timing info failed: ${infoResponse.status}`);
-      }
-
-      // Convert audio to AudioBuffer
-      const audioBlob = await audioResponse.blob();
-      const audioArrayBuffer = await audioBlob.arrayBuffer();
-      const audioContext = new (window.AudioContext ||
-        (window as any).webkitAudioContext)();
-      const audioBuffer = await audioContext.decodeAudioData(audioArrayBuffer);
-
-      // Get timing info
-      const timingInfo = await infoResponse.json();
-
-      // Use TalkingHead's speakAudio method
-      headRef.current.speakAudio({
-        audio: audioBuffer,
-        words: timingInfo.words,
-        wtimes: timingInfo.word_times,
-        wdurations: timingInfo.word_durations
-      });
-
-      showStatus(
-        `Speaking: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`,
-        'success'
-      );
-    } catch (error: any) {
-      showStatus(`Speech generation failed: ${error.message}`, 'error');
-      console.error('Speech error:', error);
-    } finally {
-      setIsSpeaking(false);
-    }
-  };
-
-  const stop = () => {
-    if (headRef.current) {
-      headRef.current.stop();
-      showStatus('Speech stopped', 'info');
-      setIsSpeaking(false);
     }
   };
 
@@ -316,14 +408,14 @@ const TalkingHead: React.FC<TalkingHeadProps> = ({
   return (
     <Card className={`w-full ${className}`}>
       <CardHeader className="text-center">
-        <CardTitle className="text-2xl font-bold">TalkingHead Avatar</CardTitle>
+        <CardTitle className="text-2xl font-bold">AI Avatar</CardTitle>
         <CardDescription>
-          High-quality text-to-speech with 3D avatar lip-sync
+          Voice-controlled 3D avatar with native timing
         </CardDescription>
       </CardHeader>
 
       <CardContent className="space-y-6">
-        {/* Main Avatar Display */}
+        {/* Avatar Display */}
         <div
           className="relative overflow-hidden rounded-lg bg-gradient-to-br from-gray-100 to-gray-200"
           style={{ height: '500px' }}
@@ -337,74 +429,54 @@ const TalkingHead: React.FC<TalkingHeadProps> = ({
                 <Loader2 className="text-primary mx-auto mb-4 h-12 w-12 animate-spin" />
                 <p className="text-muted-foreground">
                   {!scriptsLoaded
-                    ? 'Loading TalkingHead library...'
+                    ? 'Loading TalkingHead...'
                     : 'Loading avatar...'}
                 </p>
               </div>
             </div>
           )}
 
-          {/* Status Badge */}
+          {/* Status Badges */}
           {scriptsLoaded && !isLoading && (
-            <div className="absolute top-4 left-4">
-              <Badge variant={isSpeaking ? 'destructive' : 'secondary'}>
-                {isSpeaking ? 'Speaking...' : 'Ready'}
+            <div className="absolute top-4 left-4 space-y-2">
+              <Badge variant={isConnected ? 'default' : 'secondary'}>
+                {isConnecting
+                  ? 'Connecting...'
+                  : isConnected
+                    ? 'Connected'
+                    : 'Disconnected'}
               </Badge>
+              {isSpeaking && (
+                <Badge variant="destructive" className="block">
+                  Speaking...
+                </Badge>
+              )}
             </div>
           )}
         </div>
 
-        {/* Text Input */}
-        <div className="space-y-2">
-          <Label htmlFor="text-input">Text to speak:</Label>
-          <Textarea
-            id="text-input"
-            value={textInput}
-            onChange={(e) => setTextInput(e.target.value)}
-            placeholder="Enter text here..."
-            className="min-h-[100px]"
-            rows={4}
-          />
-        </div>
-
-        {/* Main Control Buttons */}
+        {/* Connection Control */}
         <div className="flex gap-3">
           <Button
-            onClick={speak}
-            disabled={isSpeaking || !scriptsLoaded || !textInput.trim()}
+            onClick={isConnected ? disconnect : connect}
+            disabled={isConnecting || !scriptsLoaded}
             className="flex-1"
-            size="lg"
+            variant={isConnected ? 'destructive' : 'default'}
           >
-            {isSpeaking ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Speaking...
-              </>
-            ) : (
-              <>
-                <Play className="mr-2 h-4 w-4" />
-                Speak
-              </>
-            )}
-          </Button>
-
-          <Button
-            onClick={stop}
-            disabled={!isSpeaking}
-            variant="destructive"
-            size="lg"
-          >
-            <Square className="mr-2 h-4 w-4" />
-            Stop
+            {isConnecting
+              ? 'Connecting...'
+              : isConnected
+                ? 'Disconnect'
+                : 'Connect'}
           </Button>
         </div>
 
-        {/* Advanced Settings */}
+        {/* Settings */}
         <Collapsible open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
           <CollapsibleTrigger asChild>
             <Button variant="outline" className="w-full">
               <Settings className="mr-2 h-4 w-4" />
-              Avatar & Voice Settings
+              Avatar Settings
               {isSettingsOpen ? (
                 <ChevronUp className="ml-2 h-4 w-4" />
               ) : (
@@ -413,33 +485,15 @@ const TalkingHead: React.FC<TalkingHeadProps> = ({
             </Button>
           </CollapsibleTrigger>
           <CollapsibleContent className="mt-4 space-y-4">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              {/* Voice Selection */}
+            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="voice-select">Voice</Label>
-                <Select value={selectedVoice} onValueChange={setSelectedVoice}>
-                  <SelectTrigger id="voice-select">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {voiceOptions.map((voice) => (
-                      <SelectItem key={voice.value} value={voice.value}>
-                        {voice.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              {/* Avatar Selection */}
-              <div className="space-y-2">
-                <Label htmlFor="avatar-select">Avatar</Label>
+                <Label>Avatar</Label>
                 <Select
                   value={selectedAvatar}
                   onValueChange={handleAvatarChange}
                   disabled={!scriptsLoaded}
                 >
-                  <SelectTrigger id="avatar-select">
+                  <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -452,15 +506,14 @@ const TalkingHead: React.FC<TalkingHeadProps> = ({
                 </Select>
               </div>
 
-              {/* Mood Selection */}
               <div className="space-y-2">
-                <Label htmlFor="mood-select">Mood</Label>
+                <Label>Mood</Label>
                 <Select
                   value={selectedMood}
                   onValueChange={handleMoodChange}
                   disabled={!scriptsLoaded}
                 >
-                  <SelectTrigger id="mood-select">
+                  <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -472,27 +525,6 @@ const TalkingHead: React.FC<TalkingHeadProps> = ({
                   </SelectContent>
                 </Select>
               </div>
-            </div>
-
-            <Separator />
-
-            <div className="text-muted-foreground text-sm">
-              <p className="mb-1 font-medium">Current Configuration:</p>
-              <ul className="space-y-1">
-                <li>
-                  • Voice:{' '}
-                  {voiceOptions.find((v) => v.value === selectedVoice)?.label}
-                </li>
-                <li>
-                  • Avatar:{' '}
-                  {avatarOptions.find((a) => a.value === selectedAvatar)?.label}
-                </li>
-                <li>
-                  • Mood:{' '}
-                  {moodOptions.find((m) => m.value === selectedMood)?.label}
-                </li>
-                <li>• TTS Server: {kokoroEndpoint}</li>
-              </ul>
             </div>
           </CollapsibleContent>
         </Collapsible>

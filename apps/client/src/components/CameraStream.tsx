@@ -6,11 +6,13 @@ import { Camera, CameraOff, Move, Maximize2, Minimize2, X } from 'lucide-react';
 interface CameraStreamProps {
   className?: string;
   onClose?: () => void;
+  onStreamChange?: (stream: MediaStream | null) => void;
 }
 
 const CameraStream: React.FC<CameraStreamProps> = ({
   className = '',
-  onClose
+  onClose,
+  onStreamChange
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -21,7 +23,7 @@ const CameraStream: React.FC<CameraStreamProps> = ({
   const [isVisible, setIsVisible] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
 
-  // Calculate initial position immediately to avoid animation from top-left
+  // Calculate initial position
   const getInitialPosition = useCallback(() => {
     if (typeof window === 'undefined') return { x: 0, y: 0 };
 
@@ -38,26 +40,21 @@ const CameraStream: React.FC<CameraStreamProps> = ({
   const [position, setPosition] = useState(getInitialPosition);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
 
-  // Adjust position when expanding/contracting to keep it in viewport
-  const adjustPositionForSize = useCallback(
-    (newIsExpanded: boolean) => {
-      const currentWidth = isExpanded ? 400 : 200;
-      const currentHeight = isExpanded ? 300 : 150;
+  // Adjust position when expanding/contracting
+  const adjustPositionForSize = useCallback((newIsExpanded: boolean) => {
+    setPosition((current) => {
       const newWidth = newIsExpanded ? 400 : 200;
       const newHeight = newIsExpanded ? 300 : 150;
+      const maxX = window.innerWidth - newWidth - 20;
+      const maxY = window.innerHeight - newHeight - 20;
 
-      setPosition((current) => {
-        const maxX = window.innerWidth - newWidth - 20;
-        const maxY = window.innerHeight - newHeight - 20;
+      return {
+        x: Math.max(0, Math.min(maxX, current.x)),
+        y: Math.max(0, Math.min(maxY, current.y))
+      };
+    });
+  }, []);
 
-        return {
-          x: Math.max(0, Math.min(maxX, current.x)),
-          y: Math.max(0, Math.min(maxY, current.y))
-        };
-      });
-    },
-    [isExpanded]
-  );
   const [error, setError] = useState<string | null>(null);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
@@ -78,7 +75,7 @@ const CameraStream: React.FC<CameraStreamProps> = ({
       console.error('Error getting devices:', error);
       setError('Failed to get camera devices');
     }
-  }, [selectedDeviceId]);
+  }, []); // Remove selectedDeviceId dependency
 
   // Start camera stream
   const startStream = useCallback(async () => {
@@ -134,6 +131,13 @@ const CameraStream: React.FC<CameraStreamProps> = ({
     }
   }, [isStreaming, startStream, stopStream]);
 
+  // Notify parent of stream changes
+  useEffect(() => {
+    if (onStreamChange) {
+      onStreamChange(isStreaming ? streamRef.current : null);
+    }
+  }, [isStreaming, onStreamChange]);
+
   // Mouse down handler for dragging
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (!containerRef.current) return;
@@ -152,12 +156,10 @@ const CameraStream: React.FC<CameraStreamProps> = ({
     (e: MouseEvent) => {
       if (!isDragging) return;
 
-      // Use requestAnimationFrame for smoother updates
       requestAnimationFrame(() => {
         const newX = e.clientX - dragOffset.x;
         const newY = e.clientY - dragOffset.y;
 
-        // Keep within viewport bounds
         const maxX = window.innerWidth - (isExpanded ? 400 : 200);
         const maxY = window.innerHeight - (isExpanded ? 300 : 150);
 
@@ -175,7 +177,7 @@ const CameraStream: React.FC<CameraStreamProps> = ({
     setIsDragging(false);
   }, []);
 
-  // Update position when window resizes or camera expands/contracts
+  // Update position when window resizes
   useEffect(() => {
     const handleResize = () => {
       if (!isDragging) {
@@ -190,7 +192,7 @@ const CameraStream: React.FC<CameraStreamProps> = ({
   // Initialize devices on mount
   useEffect(() => {
     getDevices();
-  }, [getDevices]);
+  }, []); // Remove getDevices dependency
 
   // Cleanup on unmount
   useEffect(() => {
@@ -308,7 +310,7 @@ const CameraStream: React.FC<CameraStreamProps> = ({
           </div>
         )}
 
-        {/* Camera Switch (only show when expanded and multiple cameras) */}
+        {/* Camera Switch */}
         {isExpanded && devices.length > 1 && (
           <div className="absolute right-1 bottom-1">
             <select
@@ -330,13 +332,14 @@ const CameraStream: React.FC<CameraStreamProps> = ({
   );
 };
 
-// Floating Camera Toggle Button - to show/hide the camera
-export const CameraToggleButton: React.FC = () => {
+// Floating Camera Toggle Button
+export const CameraToggleButton: React.FC<{
+  onStreamChange?: (stream: MediaStream | null) => void;
+}> = ({ onStreamChange }) => {
   const [showCamera, setShowCamera] = useState(false);
 
   return (
     <>
-      {/* Always show the toggle button */}
       <button
         onClick={() => setShowCamera(!showCamera)}
         className={`fixed right-6 bottom-6 z-40 rounded-full p-4 text-white shadow-lg transition-colors ${
@@ -349,7 +352,12 @@ export const CameraToggleButton: React.FC = () => {
         {showCamera ? <CameraOff size={24} /> : <Camera size={24} />}
       </button>
 
-      {showCamera && <CameraStream onClose={() => setShowCamera(false)} />}
+      {showCamera && (
+        <CameraStream
+          onClose={() => setShowCamera(false)}
+          onStreamChange={onStreamChange}
+        />
+      )}
     </>
   );
 };

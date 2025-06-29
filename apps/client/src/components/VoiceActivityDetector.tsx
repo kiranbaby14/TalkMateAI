@@ -1,14 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import {
-  Mic,
-  MicOff,
-  Volume2,
-  Settings,
-  ChevronDown,
-  ChevronUp
-} from 'lucide-react';
+import { Mic, MicOff, Settings, ChevronDown, ChevronUp } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -25,15 +18,7 @@ import {
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { Separator } from '@/components/ui/separator';
-
-interface AudioSegment {
-  id: string;
-  timestamp: Date;
-  duration: number;
-  audioBlob: Blob;
-  audioUrl: string;
-}
+import { useWebSocketContext } from '@/contexts/WebSocketContext';
 
 interface VADConfig {
   energyThreshold: number;
@@ -43,7 +28,11 @@ interface VADConfig {
   sampleRate: number;
 }
 
-// Animated Voice Blob Component - Fixed for SSR hydration
+interface VoiceActivityDetectorProps {
+  cameraStream?: MediaStream | null;
+}
+
+// Voice Blob Component
 const VoiceBlob: React.FC<{
   energy: number;
   isActive: boolean;
@@ -57,7 +46,6 @@ const VoiceBlob: React.FC<{
     const interval = setInterval(() => {
       setAnimationTime(Date.now());
     }, 50);
-
     return () => clearInterval(interval);
   }, []);
 
@@ -70,14 +58,12 @@ const VoiceBlob: React.FC<{
     const points = 12;
     const baseRadius = size / 2;
     const spikeVariation = energy * 15 + 5;
-
     let path = '';
 
     for (let i = 0; i < points; i++) {
       const angle = (i / points) * Math.PI * 2;
       const randomSpike = Math.sin(angle * 3 + time * 0.005) * spikeVariation;
       const radius = baseRadius + randomSpike;
-
       const x = Math.cos(angle) * radius + size / 2;
       const y = Math.sin(angle) * radius + size / 2;
 
@@ -90,16 +76,13 @@ const VoiceBlob: React.FC<{
         const prevRadius = baseRadius + prevSpike;
         const prevX = Math.cos(prevAngle) * prevRadius + size / 2;
         const prevY = Math.sin(prevAngle) * prevRadius + size / 2;
-
         const cp1x = prevX + Math.cos(prevAngle + Math.PI / 2) * 10;
         const cp1y = prevY + Math.sin(prevAngle + Math.PI / 2) * 10;
         const cp2x = x + Math.cos(angle - Math.PI / 2) * 10;
         const cp2y = y + Math.sin(angle - Math.PI / 2) * 10;
-
         path += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${x} ${y}`;
       }
     }
-
     path += ' Z';
     return path;
   };
@@ -120,7 +103,6 @@ const VoiceBlob: React.FC<{
         path += ` L ${x} ${y}`;
       }
     }
-
     path += ' Z';
     return path;
   };
@@ -138,7 +120,6 @@ const VoiceBlob: React.FC<{
           width={maxSize + 20}
           height={maxSize + 20}
           className="overflow-visible"
-          style={{ filter: 'drop-shadow(0 4px 20px rgba(0,0,0,0.1))' }}
         >
           <defs>
             <radialGradient id="blobGradient" cx="50%" cy="50%">
@@ -209,9 +190,10 @@ const VoiceBlob: React.FC<{
   );
 };
 
-const VoiceActivityDetector: React.FC = () => {
+const VoiceActivityDetector: React.FC<VoiceActivityDetectorProps> = ({
+  cameraStream
+}) => {
   const [isListening, setIsListening] = useState(false);
-  const [audioSegments, setAudioSegments] = useState<AudioSegment[]>([]);
   const [currentEnergy, setCurrentEnergy] = useState(0);
   const [isSpeechActive, setIsSpeechActive] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -228,14 +210,94 @@ const VoiceActivityDetector: React.FC = () => {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
 
-  // Simple speech detection state - NO COMPLEX LOGIC
+  // Speech detection state
   const audioBufferRef = useRef<Float32Array[]>([]);
   const silenceFramesRef = useRef(0);
   const speechFramesRef = useRef(0);
   const isInSpeechRef = useRef(false);
   const speechStartTimeRef = useRef(0);
 
-  // Initialize audio worklet processor
+  // WebSocket integration
+  const {
+    isConnected,
+    connect,
+    sendAudioSegment,
+    sendImage,
+    sendAudioWithImage
+  } = useWebSocketContext();
+
+  // Auto-connect to WebSocket on mount
+  useEffect(() => {
+    connect();
+  }, [connect]);
+
+  // Capture image from camera stream
+  const captureImageFromStream = useCallback((): string | null => {
+    if (!cameraStream) return null;
+
+    try {
+      const video = document.createElement('video');
+      video.srcObject = cameraStream;
+      video.play();
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 320;
+      canvas.height = 240;
+      const ctx = canvas.getContext('2d');
+
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+      }
+    } catch (error) {
+      console.error('Error capturing image:', error);
+    }
+    return null;
+  }, [cameraStream]);
+
+  // Create audio blob and send to WebSocket
+  const createAndSendAudio = useCallback(
+    (audioBuffers: Float32Array[]) => {
+      if (!isConnected) return;
+
+      const totalLength = audioBuffers.reduce(
+        (sum, buffer) => sum + buffer.length,
+        0
+      );
+      const combinedBuffer = new Float32Array(totalLength);
+
+      let offset = 0;
+      for (const buffer of audioBuffers) {
+        combinedBuffer.set(buffer, offset);
+        offset += buffer.length;
+      }
+
+      // Convert Float32 to Int16
+      const int16Buffer = new Int16Array(combinedBuffer.length);
+      for (let i = 0; i < combinedBuffer.length; i++) {
+        int16Buffer[i] = Math.max(
+          -32768,
+          Math.min(32767, combinedBuffer[i] * 32767)
+        );
+      }
+
+      const audioData = int16Buffer.buffer;
+
+      // Send with or without image based on camera state
+      const imageData = captureImageFromStream();
+
+      if (imageData) {
+        sendAudioWithImage(audioData, imageData);
+        console.log('Sent audio + image to server');
+      } else {
+        sendAudioSegment(audioData);
+        console.log('Sent audio to server');
+      }
+    },
+    [isConnected, sendAudioSegment, sendAudioWithImage, captureImageFromStream]
+  );
+
+  // Initialize audio worklet
   const initializeAudioWorklet = useCallback(async () => {
     try {
       if (!audioContextRef.current) {
@@ -292,7 +354,6 @@ const VoiceActivityDetector: React.FC = () => {
 
       const blob = new Blob([workletCode], { type: 'application/javascript' });
       const workletUrl = URL.createObjectURL(blob);
-
       await audioContext.audioWorklet.addModule(workletUrl);
       URL.revokeObjectURL(workletUrl);
 
@@ -303,74 +364,7 @@ const VoiceActivityDetector: React.FC = () => {
     }
   }, [config.sampleRate]);
 
-  // Convert Float32Array to audio blob
-  const createAudioBlob = useCallback(
-    (audioBuffers: Float32Array[]) => {
-      const totalLength = audioBuffers.reduce(
-        (sum, buffer) => sum + buffer.length,
-        0
-      );
-      const combinedBuffer = new Float32Array(totalLength);
-
-      let offset = 0;
-      for (const buffer of audioBuffers) {
-        combinedBuffer.set(buffer, offset);
-        offset += buffer.length;
-      }
-
-      // Convert Float32 to Int16
-      const int16Buffer = new Int16Array(combinedBuffer.length);
-      for (let i = 0; i < combinedBuffer.length; i++) {
-        int16Buffer[i] = Math.max(
-          -32768,
-          Math.min(32767, combinedBuffer[i] * 32767)
-        );
-      }
-
-      // Create WAV file
-      const wavBuffer = createWAVFile(int16Buffer, config.sampleRate);
-      return new Blob([wavBuffer], { type: 'audio/wav' });
-    },
-    [config.sampleRate]
-  );
-
-  // Create WAV file from PCM data
-  const createWAVFile = (
-    samples: Int16Array,
-    sampleRate: number
-  ): ArrayBuffer => {
-    const buffer = new ArrayBuffer(44 + samples.length * 2);
-    const view = new DataView(buffer);
-
-    const writeString = (offset: number, string: string) => {
-      for (let i = 0; i < string.length; i++) {
-        view.setUint8(offset + i, string.charCodeAt(i));
-      }
-    };
-
-    writeString(0, 'RIFF');
-    view.setUint32(4, 36 + samples.length * 2, true);
-    writeString(8, 'WAVE');
-    writeString(12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeString(36, 'data');
-    view.setUint32(40, samples.length * 2, true);
-
-    let offset = 44;
-    for (let i = 0; i < samples.length; i++, offset += 2) {
-      view.setInt16(offset, samples[i], true);
-    }
-
-    return buffer;
-  };
-
-  // SUPER SIMPLE speech detection - no complex state management
+  // Process audio data for speech detection
   const processAudioData = useCallback(
     (energy: number, audioData: Float32Array) => {
       setCurrentEnergy(energy);
@@ -383,7 +377,6 @@ const VoiceActivityDetector: React.FC = () => {
         sampleRate
       } = config;
 
-      // Convert durations to frame counts (1024 samples per frame at 16kHz ≈ 64ms per frame)
       const conversationBreakFrames = Math.floor(
         (conversationBreakDuration * sampleRate) / 1024
       );
@@ -394,55 +387,34 @@ const VoiceActivityDetector: React.FC = () => {
         (maxSpeechDuration * sampleRate) / 1024
       );
 
-      // ALWAYS add audio to buffer - this ensures continuous capture
       audioBufferRef.current.push(new Float32Array(audioData));
 
       if (energy > energyThreshold) {
-        // Speech detected
         if (!isInSpeechRef.current) {
-          // Starting new speech
           console.log('🎤 Speech started');
           isInSpeechRef.current = true;
           speechStartTimeRef.current = Date.now();
           setIsSpeechActive(true);
         }
         speechFramesRef.current++;
-        silenceFramesRef.current = 0; // Reset silence counter
+        silenceFramesRef.current = 0;
       } else {
-        // Silence detected
         if (isInSpeechRef.current) {
           silenceFramesRef.current++;
 
-          // Check if we should save (long enough silence)
           if (
             silenceFramesRef.current >= conversationBreakFrames &&
             speechFramesRef.current >= minSpeechFrames
           ) {
             console.log('💾 Saving speech segment');
+            createAndSendAudio(audioBufferRef.current);
 
-            // Save the segment
-            const duration = (Date.now() - speechStartTimeRef.current) / 1000;
-            const audioBlob = createAudioBlob(audioBufferRef.current);
-            const audioUrl = URL.createObjectURL(audioBlob);
-
-            const newSegment: AudioSegment = {
-              id: Date.now().toString(),
-              timestamp: new Date(speechStartTimeRef.current),
-              duration: duration,
-              audioBlob,
-              audioUrl
-            };
-
-            setAudioSegments((prev) => [newSegment, ...prev]);
-
-            // SIMPLE reset - just clear counters and buffer, keep listening
+            // Reset for next segment
             speechFramesRef.current = 0;
             silenceFramesRef.current = 0;
             isInSpeechRef.current = false;
             audioBufferRef.current = [];
             setIsSpeechActive(false);
-
-            console.log('✅ Segment saved, ready for next speech');
           }
         }
       }
@@ -450,31 +422,15 @@ const VoiceActivityDetector: React.FC = () => {
       // Handle max duration
       if (isInSpeechRef.current && speechFramesRef.current >= maxSpeechFrames) {
         console.log('⏰ Max duration reached, saving segment');
+        createAndSendAudio(audioBufferRef.current);
 
-        const duration = (Date.now() - speechStartTimeRef.current) / 1000;
-        const audioBlob = createAudioBlob(audioBufferRef.current);
-        const audioUrl = URL.createObjectURL(audioBlob);
-
-        const newSegment: AudioSegment = {
-          id: Date.now().toString(),
-          timestamp: new Date(speechStartTimeRef.current),
-          duration: duration,
-          audioBlob,
-          audioUrl
-        };
-
-        setAudioSegments((prev) => [newSegment, ...prev]);
-
-        // Reset and immediately start new segment if still speaking
         speechStartTimeRef.current = Date.now();
         speechFramesRef.current = 0;
         silenceFramesRef.current = 0;
-        audioBufferRef.current = [new Float32Array(audioData)]; // Start new segment with current frame
-
-        console.log('🔄 Max duration segment saved, continuing...');
+        audioBufferRef.current = [new Float32Array(audioData)];
       }
 
-      // Prevent buffer from growing too large during long silences
+      // Prevent buffer overflow during long silences
       if (
         !isInSpeechRef.current &&
         audioBufferRef.current.length > conversationBreakFrames * 2
@@ -484,7 +440,7 @@ const VoiceActivityDetector: React.FC = () => {
         );
       }
     },
-    [config, createAudioBlob]
+    [config, createAndSendAudio]
   );
 
   // Start listening
@@ -501,7 +457,6 @@ const VoiceActivityDetector: React.FC = () => {
       });
 
       mediaStreamRef.current = stream;
-
       const audioContext = await initializeAudioWorklet();
       const source = audioContext.createMediaStreamSource(stream);
       const workletNode = new AudioWorkletNode(
@@ -518,12 +473,11 @@ const VoiceActivityDetector: React.FC = () => {
       };
 
       source.connect(workletNode);
-
       setIsListening(true);
-      console.log('🚀 Started continuous listening');
+      console.log('🚀 Started voice detection');
     } catch (error) {
       console.error('Failed to start listening:', error);
-      alert('Failed to access microphone. Please check permissions.');
+      alert('Failed to access microphone');
     }
   }, [config.sampleRate, initializeAudioWorklet, processAudioData]);
 
@@ -544,7 +498,7 @@ const VoiceActivityDetector: React.FC = () => {
       audioContextRef.current = null;
     }
 
-    // Reset all state
+    // Reset state
     audioBufferRef.current = [];
     silenceFramesRef.current = 0;
     speechFramesRef.current = 0;
@@ -553,7 +507,6 @@ const VoiceActivityDetector: React.FC = () => {
     setIsListening(false);
     setCurrentEnergy(0);
     setIsSpeechActive(false);
-
     console.log('🛑 Stopped listening');
   }, []);
 
@@ -566,42 +519,19 @@ const VoiceActivityDetector: React.FC = () => {
     }
   }, [isListening, startListening, stopListening]);
 
-  // Clear all segments
-  const clearSegments = useCallback(() => {
-    audioSegments.forEach((segment) => {
-      URL.revokeObjectURL(segment.audioUrl);
-    });
-    setAudioSegments([]);
-  }, [audioSegments]);
-
-  // Download segment
-  const downloadSegment = useCallback((segment: AudioSegment) => {
-    const link = document.createElement('a');
-    link.href = segment.audioUrl;
-    link.download = `speech_${segment.id}.wav`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  }, []);
-
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopListening();
-      audioSegments.forEach((segment) => {
-        URL.revokeObjectURL(segment.audioUrl);
-      });
     };
-  }, []);
+  }, [stopListening]);
 
   return (
     <Card className="mx-auto w-full max-w-4xl">
       <CardHeader className="text-center">
-        <CardTitle className="text-2xl font-bold">
-          Voice Activity Detector
-        </CardTitle>
+        <CardTitle className="text-2xl font-bold">Voice Control</CardTitle>
         <CardDescription>
-          Continuous speech detection - speak, pause 2.5s to save, keep talking!
+          Speak naturally - pauses trigger responses
         </CardDescription>
       </CardHeader>
 
@@ -612,17 +542,17 @@ const VoiceActivityDetector: React.FC = () => {
             onClick={toggleListening}
             size="lg"
             variant={isListening ? 'destructive' : 'default'}
-            className="flex items-center space-x-2"
+            disabled={!isConnected}
           >
             {isListening ? <MicOff size={20} /> : <Mic size={20} />}
-            <span>{isListening ? 'Stop Listening' : 'Start Listening'}</span>
+            <span className="ml-2">
+              {!isConnected
+                ? 'Connecting...'
+                : isListening
+                  ? 'Stop Voice Control'
+                  : 'Start Voice Control'}
+            </span>
           </Button>
-
-          {audioSegments.length > 0 && (
-            <Button onClick={clearSegments} variant="outline" size="lg">
-              Clear All
-            </Button>
-          )}
         </div>
 
         {/* Status Indicators */}
@@ -630,12 +560,19 @@ const VoiceActivityDetector: React.FC = () => {
           <div className="text-center">
             <div
               className={`inline-block h-3 w-3 rounded-full ${
-                isListening ? 'bg-green-500' : 'bg-gray-300'
+                isConnected ? 'bg-green-500' : 'bg-gray-300'
+              }`}
+            />
+            <p className="text-muted-foreground mt-1 text-sm">Server</p>
+          </div>
+          <div className="text-center">
+            <div
+              className={`inline-block h-3 w-3 rounded-full ${
+                isListening ? 'bg-blue-500' : 'bg-gray-300'
               }`}
             />
             <p className="text-muted-foreground mt-1 text-sm">Microphone</p>
           </div>
-
           <div className="text-center">
             <div
               className={`inline-block h-3 w-3 rounded-full ${
@@ -643,6 +580,14 @@ const VoiceActivityDetector: React.FC = () => {
               }`}
             />
             <p className="text-muted-foreground mt-1 text-sm">Speech Active</p>
+          </div>
+          <div className="text-center">
+            <div
+              className={`inline-block h-3 w-3 rounded-full ${
+                cameraStream ? 'bg-purple-500' : 'bg-gray-300'
+              }`}
+            />
+            <p className="text-muted-foreground mt-1 text-sm">Camera</p>
           </div>
         </div>
 
@@ -655,12 +600,12 @@ const VoiceActivityDetector: React.FC = () => {
           />
         </div>
 
-        {/* Advanced Settings */}
+        {/* Settings */}
         <Collapsible open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
           <CollapsibleTrigger asChild>
             <Button variant="outline" className="w-full">
               <Settings className="mr-2 h-4 w-4" />
-              Advanced Settings
+              Detection Settings
               {isSettingsOpen ? (
                 <ChevronUp className="ml-2 h-4 w-4" />
               ) : (
@@ -688,7 +633,7 @@ const VoiceActivityDetector: React.FC = () => {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="break">Save After Silence (s)</Label>
+                <Label htmlFor="break">Pause Duration (s)</Label>
                 <Input
                   id="break"
                   type="number"
@@ -740,58 +685,6 @@ const VoiceActivityDetector: React.FC = () => {
             </div>
           </CollapsibleContent>
         </Collapsible>
-
-        <Separator />
-
-        {/* Audio Segments */}
-        <div>
-          <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-lg font-semibold">Detected Speech Segments</h3>
-            <Badge variant="secondary">{audioSegments.length} segments</Badge>
-          </div>
-
-          {audioSegments.length === 0 ? (
-            <div className="text-muted-foreground py-8 text-center">
-              <Volume2 className="mx-auto mb-2 h-12 w-12 opacity-50" />
-              <p>No speech segments detected yet.</p>
-              <p className="text-sm">
-                Start listening and speak to see results.
-              </p>
-            </div>
-          ) : (
-            <div className="max-h-64 space-y-3 overflow-y-auto">
-              {audioSegments.map((segment) => (
-                <div
-                  key={segment.id}
-                  className="hover:bg-muted/50 flex items-center justify-between rounded-lg border p-4 transition-colors"
-                >
-                  <div className="flex items-center space-x-3">
-                    <Volume2 size={20} className="text-primary" />
-                    <div>
-                      <p className="font-medium">
-                        {segment.timestamp.toLocaleTimeString()}
-                      </p>
-                      <p className="text-muted-foreground text-sm">
-                        Duration: {segment.duration.toFixed(2)}s
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center space-x-2">
-                    <audio controls src={segment.audioUrl} className="h-8" />
-                    <Button
-                      onClick={() => downloadSegment(segment)}
-                      size="sm"
-                      variant="outline"
-                    >
-                      Download
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
       </CardContent>
     </Card>
   );
