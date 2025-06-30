@@ -13,7 +13,9 @@
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 
-![TalkMateAI Interface](https://github.com/kiranbaby14/TalkMateAI/blob/master/images/Screenshot.png)
+## 🎥 Demo Video
+
+[![TalkMateAI Demo](https://img.youtube.com/vi/dE_8TXmp2Sk/maxresdefault.jpg)](https://www.youtube.com/watch?v=dE_8TXmp2Sk)
 
 ## ✨ Features
 
@@ -57,7 +59,7 @@
 
 ### System Tested on
 - **OS:** Windows 11 (Linux/macOS support coming soon, will create a docker image)
-- **GPU:** NVIDIA RTX 3070 (8GB VRAM recommended)
+- **GPU:** NVIDIA RTX 3070 (8GB VRAM)
 
 ## 🚀 Quick Start
 
