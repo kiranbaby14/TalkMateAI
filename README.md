@@ -35,6 +35,7 @@
 - **🔄 WebSocket Communication** - Low-latency bidirectional data flow
 
 ## 🏗️ Architecture
+![System Architecture](./images/architecture.svg)
 
 
 ## 🛠️ Technology Stack
@@ -55,6 +56,13 @@
 - **🎙️ Audio:** Web Audio API with AudioWorklet
 - **📡 Communication:** Native WebSocket with React Context
 
+### 🔧 **Development Tools**
+- **📦 Package Management:** UV (Python) + PNPM (Node.js)
+- **🎨 Code Formatting:** 
+  - **Backend:** Black (Python)
+  - **Frontend:** Prettier (TypeScript/React)
+- **🔍 Quality Control:** Husky for pre-commit hooks
+
 ## 📋 Requirements
 
 ### System Tested on
@@ -74,6 +82,12 @@
 ```bash
 # will setup both frontend and backend but require the prerequisites
 pnpm run monorepo-setup
+```
+
+### 3. **Development Workflow**
+```bash
+# Format code before committing (recommended)
+pnpm format
 ```
 
 ### 4. Run the Application
